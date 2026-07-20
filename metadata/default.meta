@@ -1,0 +1,38 @@
+## TA-oura metadata — write-lock everything to admin/sc_admin (self-managed +
+## Splunk Cloud). Read is broad so the wearables app + dashboards can use the
+## normalized fields and lookups. The lookups are enrichment/identity only; the
+## real access boundary is authorize.conf srchFilter on the indexed person_id.
+
+## App-wide backstop: no non-admin writes any object in this add-on.
+[]
+access = read : [ * ], write : [ admin, sc_admin ]
+export = system
+
+## Lookup definitions (explicit — belt-and-suspenders over the backstop).
+[transforms/wearable_identity_map]
+access = read : [ * ], write : [ admin, sc_admin ]
+export = system
+
+[transforms/wearable_person_profile]
+access = read : [ * ], write : [ admin, sc_admin ]
+export = system
+
+## Lookup table files (the physical CSVs).
+[lookups/wearable_identity_map.csv]
+access = read : [ * ], write : [ admin, sc_admin ]
+export = system
+
+[lookups/wearable_person_profile.csv]
+access = read : [ * ], write : [ admin, sc_admin ]
+export = system
+
+## Props/eventtypes/tags exported so the wearables app inherits the canonical
+## fields + dataset tags.
+[props]
+export = system
+
+[eventtypes]
+export = system
+
+[tags]
+export = system
