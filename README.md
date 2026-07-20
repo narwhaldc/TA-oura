@@ -12,8 +12,9 @@ to the `wearables` dashboard app and other per-vendor add-ons such as `TA-garmin
 - **Dataset tagging** (`eventtypes.conf` / `tags.conf`): tags Oura events with
   vendor-neutral tags (`wearable`, `wearable_sleep`, …) that the Wearables data
   model constrains on.
-- **Lookups** (`transforms.conf` + `lookups/`): the identity/account map and the
-  person profile (names + goals).
+- **Lookups**: the shared person lookups (identity map + profile) now live in
+  the **wearables** app (cross-vendor, exported global); this add-on's
+  `LOOKUP-` props reference them by name.
 
 ## Identity & access model
 - **Identity is stamped at INGEST**, not here: the Oura fetcher sends `vendor` and
