@@ -11,9 +11,15 @@ dist/
 *~
 
 # ingest state / creds (repo-only tooling; NEVER commit)
+# NOTE: bare names match at ANY depth (repo ROOT *and* tools/); the **/ and /.env
+# forms are explicit belt-and-suspenders so root-level creds can never leak.
 .env
+/.env
+**/.env
 oura_targets.json
+**/oura_targets.json
 oura_tokens.json
+**/oura_tokens.json
 oura_checkpoint.json
 oura_dedup_store.json
 oura_sync.lock
