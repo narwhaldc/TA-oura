@@ -71,6 +71,11 @@ per data type (`oura:<data_type>`) — do not set a per-target sourcetype. This 
 **gitignored, never commit.** (Single-target alternative: `SPLUNK_HEC_URL` + `SPLUNK_HEC_TOKEN`
 env vars.)
 
+> **Index (recommended: `wearables`).** Set each target's `index` here. If you use a different
+> index, it must match the **`widx` macro** in the dashboard apps (the `wearables` app and the
+> `oura_health` app each define `widx` — see their INSTALLs), so the dashboards read the same index
+> your ingest writes to. Change it in both places (target `index` + `widx`).
+
 ## 5. Populate the registries (admin, KV Store in the wearables app)
 ```
 | makeresults | eval person_id="P001", person_name="Tony", step_goal=10000
