@@ -1,7 +1,7 @@
 # TA-oura → Splunk — Installation Guide
 
 Setup for the Oura data pipeline into the Wearables platform.
-**Add-on:** TA-oura · **Ingest:** `tools/oura_to_hec_with_phi.py` (Oura v2 API → HEC, OAuth2 pull)
+**App version:** TA-oura `0.2.10` · **Ingest:** `tools/oura_to_hec_with_phi.py` (Oura v2 API → HEC, OAuth2 pull)
 
 The Oura fetcher moved here from the legacy `oura-health-splunk` repo (2026-07) so each vendor's
 normalization + ingest live together. It's **repo-only tooling — never shipped in the `.spl`**
