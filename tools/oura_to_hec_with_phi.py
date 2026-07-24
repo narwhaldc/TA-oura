@@ -68,6 +68,8 @@ import secrets
 import hashlib
 import base64
 import fcntl
+import atexit
+import signal
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -1299,8 +1301,11 @@ def main():
 
     # -- Acquire exclusive lock -----------------------------------------------
     # Prevents two instances (e.g. cron + manual) from racing on the same
-    # checkpoint/dedup store files. Uses fcntl.flock() which auto-releases
-    # on process exit or crash — no stale lock cleanup needed.
+    # checkpoint/dedup store files. fcntl.flock() auto-releases the LOCK on
+    # process exit/crash; we additionally remove the lock FILE on clean exit
+    # (atexit + SIGTERM/SIGINT) so no stale file lingers. The cleanup is
+    # registered ONLY after we hold the lock, so a losing second instance can
+    # never delete the holder's file.
     lock_fp = open(LOCK_FILE, "w")
     try:
         fcntl.flock(lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1309,6 +1314,23 @@ def main():
         sys.exit(0)
     lock_fp.write(str(os.getpid()))
     lock_fp.flush()
+
+    def _release_lock():
+        try:
+            fcntl.flock(lock_fp, fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            lock_fp.close()
+        except Exception:
+            pass
+        try:
+            os.unlink(LOCK_FILE)
+        except OSError:
+            pass
+    atexit.register(_release_lock)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    signal.signal(signal.SIGINT, lambda *_: sys.exit(130))
 
     # -- Load targets ---------------------------------------------------------
     targets = load_targets(target_filter=args.target)
