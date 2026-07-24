@@ -55,6 +55,10 @@ Tokens persist to `oura_tokens.json` (`OURA_TOKEN_FILE`) and auto-refresh therea
 > Keep client secret / tokens in env or the token file — **never commit them** (gitignored).
 
 ## 4. HEC targets (`oura_targets.json`)
+Copy the template and fill in your HEC details:
+```bash
+cp tools/oura_targets.example.json tools/oura_targets.json
+```
 Multi-target fan-out; same format as `garmin_targets.json`:
 ```json
 {
