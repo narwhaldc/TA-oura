@@ -25,3 +25,4 @@ oura_dedup_store.json
 oura_sync.lock
 *.lock
 *.tmp
+*.log
