@@ -36,10 +36,13 @@ Install + restart Splunk: **`TA-oura`** (this add-on) and **`wearables`** (model
 Optionally the viz add-ons `hypnogram_viz` + `charge_ring_viz` for the custom visualizations.
 
 ## 2. Install the fetcher + deps
-Copy `tools/oura_to_hec_with_phi.py` to your ingest host:
+The fetcher is repo-only ingest tooling — **not** in the `.spl` (keeps the app Splunk-Cloud
+vetted). Get it onto your ingest host with a one-liner (no git required — just `curl`):
 ```bash
+curl -O https://raw.githubusercontent.com/narwhaldc/TA-oura/main/tools/oura_to_hec_with_phi.py
 python3 -m pip install requests
 ```
+(Or copy it from a checkout / `wget` the same URL.)
 
 ## 3. Oura OAuth2 authorization (one-time)
 ```bash
