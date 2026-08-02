@@ -143,6 +143,110 @@ def log_info(msg, **kv):  log.info(msg, extra={"kv": kv})
 def log_warn(msg, **kv):  log.warning(msg, extra={"kv": kv})
 def log_error(msg, **kv): log.error(msg, extra={"kv": kv})
 
+
+# ---- optional HEC log mirror (logging.method="hec" in the targets file) ----------------
+# Same contract as the other TA-* fetchers: stderr is always the source of truth (the
+# stdlib StreamHandler above); the HEC mirror is buffered via a second handler and flushed
+# at exit (atexit, so a crash still ships the ERROR). A flush failure dumps to stderr and
+# never re-sends over HEC. Dry-run never flushes. Config is a global and/or per-target
+# `logging` block; the HEC endpoint/index default to each target's own hec_url/token/index,
+# so one global {"method":"hec"} fans logs to every target's Splunk (scoped per target).
+_LOG_SINKS = []               # [{"url","token","index","verify","targets":set(),"buf":[]}]
+_LOG_STATE = {"on": False, "dry": False, "target_pids": {}, "solo_pid": None}
+
+
+class _HecBufferHandler(logging.Handler):
+    def emit(self, record):
+        if not _LOG_STATE["on"]:
+            return
+        try:
+            line = self.format(record)
+            kv = getattr(record, "kv", None) or {}
+            tgt = kv.get("target")  # scoped delivery
+            # Indexed person_id for RBAC: explicit kwarg, else the target's pid, else the
+            # run's solo pid (None on multi-person runs -> run-level lines stay admin-only).
+            pid = kv.get("person_id") or _LOG_STATE["target_pids"].get(tgt) or _LOG_STATE["solo_pid"]
+            for sink in _LOG_SINKS:
+                if tgt is None or tgt in sink["targets"]:
+                    sink["buf"].append((record.created, line, pid))
+        except Exception:
+            pass
+
+
+_hbh = _HecBufferHandler()
+_hbh.setFormatter(_LogfmtFormatter())
+logging.getLogger().addHandler(_hbh)
+
+
+def configure_hec_log(global_cfg, targets, dry_run):
+    _LOG_SINKS.clear()
+    _LOG_STATE["dry"] = dry_run
+    # person_id map for indexed RBAC on the log events: each target's pid, plus the
+    # run's "solo" pid (set only when the whole run is one person -- see the handler).
+    _LOG_STATE["target_pids"] = {tn: tc.get("person_id") for tn, tc in (targets or {}).items()}
+    _pids = sorted({p for p in _LOG_STATE["target_pids"].values() if p})
+    _LOG_STATE["solo_pid"] = _pids[0] if len(_pids) == 1 else None
+    by_key = {}
+    for tname, tcfg in (targets or {}).items():
+        merged = dict(global_cfg or {})
+        merged.update(tcfg.get("logging") or {})
+        method = merged.get("method")
+        methods = method if isinstance(method, list) else ([method] if method else [])
+        if "hec" not in [str(m).lower() for m in methods]:
+            continue
+        url = merged.get("hec_logging_url") or tcfg.get("hec_url")
+        token = merged.get("hec_logging_token") or tcfg.get("hec_token")
+        index = merged.get("hec_logging_index") or tcfg.get("index") or "wearables"
+        if not (url and token):
+            log_warn("hec log sink skipped: no hec_url/hec_token", target=tname)
+            continue
+        verify = merged.get("verify_ssl", tcfg.get("verify_ssl", True))
+        sink = by_key.get((url, token, index))
+        if sink is None:
+            sink = {"url": url, "token": token, "index": index, "verify": verify,
+                    "targets": set(), "buf": []}
+            by_key[(url, token, index)] = sink
+            _LOG_SINKS.append(sink)
+        sink["targets"].add(tname)
+    if _LOG_SINKS:
+        _LOG_STATE["on"] = True
+        atexit.register(flush_hec_log)
+        log_info("hec log sink enabled", sinks=len(_LOG_SINKS),
+                 hec_index=",".join(sorted({s["index"] for s in _LOG_SINKS})))
+
+
+def flush_hec_log():
+    for sink in _LOG_SINKS:
+        buf = sink["buf"]
+        sink["buf"] = []
+        if not buf or _LOG_STATE["dry"]:
+            continue
+        events = []
+        for t, line, pid in buf:
+            ev = {"time": t, "event": line, "sourcetype": "wearables:ingest", "index": sink["index"]}
+            if pid:
+                ev["fields"] = {"person_id": pid}   # indexed field -> RBAC scoping on the log index
+            events.append(json.dumps(ev))
+        body = "".join(events)
+        try:
+            verify = sink["verify"] if str(sink["url"]).startswith("https") else False
+            r = requests.post(sink["url"], data=body,
+                              headers={"Authorization": "Splunk " + sink["token"]},
+                              verify=verify, timeout=30)
+            r.raise_for_status()
+        except Exception as e:
+            ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            print('%s level=WARN comp=%s msg="hec log flush failed" error=%s target=%s count=%d'
+                  % (ts, _LOG_COMPONENT, type(e).__name__,
+                     ",".join(sorted(sink["targets"])), len(buf)), file=sys.stderr)
+
+
+def load_logging_cfg():
+    try:
+        return (json.loads(open(str(TARGETS_FILE)).read()) or {}).get("logging") or {}
+    except Exception:
+        return {}
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -345,6 +449,7 @@ def load_targets(target_filter: Optional[str] = None) -> dict[str, dict]:
                     # this fetcher already knows which account it is pulling.
                     "vendor":     cfg.get("vendor", "oura"),
                     "person_id":  cfg.get("person_id"),
+                    "logging":    cfg.get("logging"),
                 }
                 if not targets[name]["person_id"]:
                     log.warning("Target '%s' has no person_id — events carry vendor but no indexed "
@@ -1442,6 +1547,7 @@ def main():
     if not args.dry_run:
         save_checkpoint(checkpoint)
 
+    configure_hec_log(load_logging_cfg(), targets, args.dry_run)
     t0 = time.time()
     log_info("run started", targets=len(targets), types=len(args.data_types),
              filter=(not args.no_filter), dry_run=args.dry_run)

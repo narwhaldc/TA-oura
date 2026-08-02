@@ -11,6 +11,8 @@ Setup + run instructions: **[INSTALL.md](INSTALL.md)**.
   fetcher** that polls the Oura v2 API (OAuth2) and POSTs to Splunk HEC at `index=wearables`,
   `sourcetype=oura:<data_type>`, stamping HEC **indexed fields** `vendor="oura"` + `person_id`.
   Multi-target fan-out, per-target dedup, checkpoint, lock — see `oura_targets.json` in INSTALL.
+  **Optional:** mirror ingest logs to Splunk (a `logging` block in `oura_targets.json` → the
+  wearables **Ingest Health** dashboard). See INSTALL.md §4b.
 - **Search-time normalization** (`props.conf`): maps raw Oura fields → canonical model fields
   (Oura seconds → minutes, renames, derived `sleep_type`, contributor sub-scores). Raw JSON kept
   in `_raw`; all normalized fields additive.
