@@ -107,12 +107,41 @@ load_dotenv()  # pick up creds/config from .env next to this script (gitignored)
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-8s %(message)s",
-    datefmt="%Y-%m-%dT%H:%M:%S",
-)
+logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("oura_to_splunk")
+
+# ---- Splunk-friendly logging (logfmt: <ts> level=.. comp=oura msg=".." key=val) ----
+# A custom formatter makes EVERY log.* call emit the shared logfmt shape so Splunk can
+# auto-KV-extract; the log_info/warn/error helpers below attach structured key=value
+# fields for the operational lines (run started / sent events / run complete / run failed).
+_LOG_COMPONENT = "oura"
+
+
+def _logfmt(v):
+    s = str(v)
+    return '"' + s.replace('"', "'") + '"' if (s == "" or " " in s or "=" in s) else s
+
+
+_LEVELS = {"WARNING": "WARN", "CRITICAL": "ERROR"}  # match the other TAs' level names
+
+
+class _LogfmtFormatter(logging.Formatter):
+    def format(self, record):
+        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(record.created))
+        level = _LEVELS.get(record.levelname, record.levelname)
+        kv = getattr(record, "kv", None) or {}
+        extra = "".join(" %s=%s" % (k, _logfmt(val)) for k, val in kv.items())
+        return "%s level=%s comp=%s msg=%s%s" % (
+            ts, level, _LOG_COMPONENT, _logfmt(record.getMessage()), extra)
+
+
+for _h in logging.getLogger().handlers:
+    _h.setFormatter(_LogfmtFormatter())
+
+
+def log_info(msg, **kv):  log.info(msg, extra={"kv": kv})
+def log_warn(msg, **kv):  log.warning(msg, extra={"kv": kv})
+def log_error(msg, **kv): log.error(msg, extra={"kv": kv})
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -1188,11 +1217,18 @@ def process_data_type(
         if all_have_it and record_date > latest_date:
             latest_date = record_date
 
-    # --- Summary ---
+    # --- Summary (one logfmt line per target that received data) ---
     total_sent = sum(sent_counts.values())
-    per_target = ", ".join(f"{t}={c}" for t, c in sent_counts.items())
-    log.info("  %s: sent=%d (%s) changed=%d skipped_dup=%d fetched=%d",
-             data_type, total_sent, per_target, sent_changed, skipped_dup, len(records))
+    for tname, c in sent_counts.items():
+        if not c:
+            continue
+        log_info("sent events", person_id=targets[tname].get("person_id"),
+                 target=tname, data_type=data_type,
+                 count=c, changed=sent_changed, skipped=skipped_dup, fetched=len(records))
+    if total_sent == 0:
+        # Nothing new for any target — still record the dedup/fetch outcome.
+        log_info("no new events", data_type=data_type,
+                 skipped=skipped_dup, fetched=len(records))
 
     if total_sent > 0 or skipped_dup > 0:
         checkpoint[data_type] = latest_date
@@ -1201,7 +1237,7 @@ def process_data_type(
         # No records sent but also no error — advance anyway to avoid re-querying
         checkpoint[data_type] = end_date
 
-    return checkpoint
+    return checkpoint, total_sent, skipped_dup
 
 
 # ---------------------------------------------------------------------------
@@ -1310,7 +1346,7 @@ def main():
     try:
         fcntl.flock(lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        log.error("Another instance is already running (lock file: %s). Exiting.", LOCK_FILE)
+        log_warn("another run holds the lock; exiting", lock_file=str(LOCK_FILE))
         sys.exit(0)
     lock_fp.write(str(os.getpid()))
     lock_fp.flush()
@@ -1406,30 +1442,39 @@ def main():
     if not args.dry_run:
         save_checkpoint(checkpoint)
 
-    log.info("Starting Oura → Splunk sync | targets=%s | types=%s | filter=%s | dry_run=%s",
-             list(targets.keys()), args.data_types, not args.no_filter, args.dry_run)
+    t0 = time.time()
+    log_info("run started", targets=len(targets), types=len(args.data_types),
+             filter=(not args.no_filter), dry_run=args.dry_run)
 
     # -- Run per-type pipeline ------------------------------------------------
-    for data_type in args.data_types:
-        checkpoint = process_data_type(
-            oura_session=oura_session,
-            splunk_session=splunk_session,
-            targets=targets,
-            data_type=data_type,
-            checkpoint=checkpoint,
-            dedup_store=dedup_store,
-            backfill_date=args.backfill,
-            dry_run=args.dry_run,
-            no_filter=args.no_filter,
-            user_context=user_context,
-        )
-        if not args.dry_run:
-            save_checkpoint(checkpoint)
-            save_dedup_store(dedup_store)
+    sent_total = 0
+    skipped_total = 0
+    try:
+        for data_type in args.data_types:
+            checkpoint, sent, skipped = process_data_type(
+                oura_session=oura_session,
+                splunk_session=splunk_session,
+                targets=targets,
+                data_type=data_type,
+                checkpoint=checkpoint,
+                dedup_store=dedup_store,
+                backfill_date=args.backfill,
+                dry_run=args.dry_run,
+                no_filter=args.no_filter,
+                user_context=user_context,
+            )
+            sent_total += sent
+            skipped_total += skipped
+            if not args.dry_run:
+                save_checkpoint(checkpoint)
+                save_dedup_store(dedup_store)
+    except Exception as e:
+        log_error("run failed", error=type(e).__name__, detail=str(e),
+                  duration_s=round(time.time() - t0, 1))
+        sys.exit(1)
 
-    log.info("Sync complete.")
-    if args.dry_run:
-        log.info("(dry-run — nothing sent, checkpoint unchanged)")
+    log_info("run complete", events=sent_total, skipped=skipped_total, targets=len(targets),
+             duration_s=round(time.time() - t0, 1), dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
