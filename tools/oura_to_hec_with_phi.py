@@ -1266,6 +1266,13 @@ def process_data_type(
         needed = targets_needing_record(dedup_store, record_key, content_hash, all_target_names)
 
         record_date = str(record.get(date_field, ""))[:10]
+        # Dedup-prune date: for INGESTION_TIME_TYPES (e.g. ring_config) the
+        # date_field is a STATIC setup date (set_up_at — often years old), so
+        # pruning the dedup entry by it evicts the entry EVERY run, and the
+        # record is then re-sent on every poll (a ring set up in 2024 spammed
+        # ~116 identical copies/2d, while a freshly set-up ring deduped fine).
+        # Prune these entries by INGESTION date instead so they persist.
+        prune_date = date.today().isoformat() if data_type in INGESTION_TIME_TYPES else record_date
 
         if not needed:
             # All targets already have this record
@@ -1308,7 +1315,7 @@ def process_data_type(
             # New or changed — start fresh sent_to with only this record's successes
             dedup_store[record_key] = {
                 "hash": content_hash,
-                "date": record_date,
+                "date": prune_date,
                 "sent_to": list(record_succeeded),
             }
         else:
