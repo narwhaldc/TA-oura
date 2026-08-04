@@ -289,6 +289,16 @@ SPLUNK_SOURCETYPE  = os.getenv("SPLUNK_SOURCETYPE", "oura:ring")
 SPLUNK_VERIFY_SSL  = os.getenv("SPLUNK_VERIFY_SSL", "true").lower() != "false"
 
 # ---------------------------------------------------------------------------
+# Fetcher version — BUMP THIS each time you change this file / cut a new bundle.
+# The fetcher is repo-only (never shipped in the .spl), so this string is the
+# ONLY signal of which fetcher code is actually running on a given box. It is
+# emitted on the "run started" line — the first structured line logged AFTER the
+# HEC log sink is enabled, so it reaches Splunk (an earlier line would be
+# stderr-only) and the Ingest Health dashboard (or a `grep`) shows fetcher drift.
+# ---------------------------------------------------------------------------
+FETCHER_VERSION = "1.0.0"
+
+# ---------------------------------------------------------------------------
 # Endpoint registry
 # (endpoint_path, date_field, is_timeseries)
 # ---------------------------------------------------------------------------
@@ -1556,7 +1566,7 @@ def main():
 
     configure_hec_log(load_logging_cfg(), targets, args.dry_run)
     t0 = time.time()
-    log_info("run started", targets=len(targets), types=len(args.data_types),
+    log_info("run started", fetcher_ver=FETCHER_VERSION, targets=len(targets), types=len(args.data_types),
              filter=(not args.no_filter), dry_run=args.dry_run)
 
     # -- Run per-type pipeline ------------------------------------------------
