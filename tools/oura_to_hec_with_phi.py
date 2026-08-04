@@ -297,6 +297,11 @@ SPLUNK_VERIFY_SSL  = os.getenv("SPLUNK_VERIFY_SSL", "true").lower() != "false"
 # stderr-only) and the Ingest Health dashboard (or a `grep`) shows fetcher drift.
 # ---------------------------------------------------------------------------
 FETCHER_VERSION = "1.0.0"
+# Box running this fetcher (its OWN hostname — not Splunk's HEC `host`, which is the
+# destination). Sent as run_host= on run-started so the Ingest Health dashboard shows
+# which box/person to reach out to when a copy is stale.
+import socket
+RUN_HOST = socket.gethostname()
 
 # ---------------------------------------------------------------------------
 # Endpoint registry
@@ -1566,7 +1571,7 @@ def main():
 
     configure_hec_log(load_logging_cfg(), targets, args.dry_run)
     t0 = time.time()
-    log_info("run started", fetcher_ver=FETCHER_VERSION, targets=len(targets), types=len(args.data_types),
+    log_info("run started", fetcher_ver=FETCHER_VERSION, run_host=RUN_HOST, targets=len(targets), types=len(args.data_types),
              filter=(not args.no_filter), dry_run=args.dry_run)
 
     # -- Run per-type pipeline ------------------------------------------------
