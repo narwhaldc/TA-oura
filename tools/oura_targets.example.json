@@ -6,6 +6,7 @@
   },
   "targets": {
     "personal": {
+      "_comment": "One block per DESTINATION. Add more named targets to fan the same Oura account out to several Splunks; add a second targets FILE (OURA_TARGETS_FILE=...) to run a different Oura account for another person on the same box. person_id is REQUIRED for RBAC - register it in the wearables app first (Admin > People). Two OPTIONAL overrides exist and are almost never needed: sourcetype (the poller otherwise stamps sourcetype=oura:<type> per data type, which TA-oura's field normalization + tags key on - do NOT set it unless you know why) and vendor (relabels the events' vendor field). Leave both out.",
       "hec_url":   "https://splunk:8088/services/collector/event",
       "hec_token": "YOUR-HEC-TOKEN",
       "index":     "wearables",
