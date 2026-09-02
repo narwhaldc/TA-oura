@@ -296,7 +296,7 @@ SPLUNK_VERIFY_SSL  = os.getenv("SPLUNK_VERIFY_SSL", "true").lower() != "false"
 # HEC log sink is enabled, so it reaches Splunk (an earlier line would be
 # stderr-only) and the Ingest Health dashboard (or a `grep`) shows fetcher drift.
 # ---------------------------------------------------------------------------
-FETCHER_VERSION = "1.0.0"
+FETCHER_VERSION = "1.1.0"
 # Box running this fetcher (its OWN hostname — not Splunk's HEC `host`, which is the
 # destination). Sent as run_host= on run-started so the Ingest Health dashboard shows
 # which box/person to reach out to when a copy is stale.
@@ -1235,8 +1235,12 @@ def process_data_type(
     dry_run:        bool,
     no_filter:      bool,
     user_context:   dict,
+    backfill_end_date: Optional[str] = None,
 ) -> dict:
-    end_date   = date.today().isoformat()
+    # A bounded backfill's upper bound stands in for "today" everywhere below —
+    # the fetch range AND both no-records-found checkpoint fallbacks all key off
+    # this one variable, so bounding it here is the whole fix in one place.
+    end_date   = backfill_end_date if backfill_end_date else date.today().isoformat()
     start_date = get_start_date(checkpoint, data_type, backfill_date)
 
     if start_date > end_date:
@@ -1371,6 +1375,133 @@ def process_data_type(
 # CLI
 # ---------------------------------------------------------------------------
 
+def sync(target_filter=None, data_types=None, backfill_date=None, backfill_end_date=None,
+         dry_run=False, no_filter=False, reset_dedup=False):
+    """
+    Run one incremental sync (or backfill) and return {"sent", "skipped", "targets"}.
+
+    This is the whole "do the actual work" body, extracted out of main() so a
+    future master orchestrator (or an embedded-interpreter mobile build) can
+    call it directly in-process for one vendor among several, instead of only
+    ever being invoked as `python oura_to_hec_with_phi.py`. main() is now a
+    thin CLI wrapper: parse args, handle --auth/--status/etc., acquire the
+    single-instance file lock, then call this. Nothing about the CLI's
+    existing behavior changes — same targets file, same checkpoint/dedup
+    files, same env vars.
+
+    Raises RuntimeError on unrecoverable setup failures (no targets, all
+    targets fail pre-flight, identity resolution fails) rather than calling
+    sys.exit(), so a caller running several vendors in one process can catch
+    one vendor's failure without killing the others.
+    """
+    client_id = os.getenv("OURA_CLIENT_ID", "")
+    client_secret = os.getenv("OURA_CLIENT_SECRET", "")
+    data_types = data_types or ALL_DATA_TYPES
+
+    targets = load_targets(target_filter=target_filter)
+    if not targets and not dry_run:
+        raise RuntimeError(f"No Splunk targets configured. Either create {TARGETS_FILE} or "
+                            "set SPLUNK_HEC_URL + SPLUNK_HEC_TOKEN env vars.")
+    if not targets and dry_run:
+        # Dry-run with no targets — create a placeholder so record formatting works
+        targets = {"dry_run": {
+            "hec_url": "", "hec_token": "",
+            "index": SPLUNK_INDEX, "sourcetype": SPLUNK_SOURCETYPE,
+            "verify_ssl": True,
+        }}
+
+    oura_session   = build_oura_session(client_id, client_secret)
+    splunk_session = requests.Session()
+
+    if targets.get("dry_run", {}).get("hec_url") == "":
+        log.info("Dry-run with no targets file — skipping HEC pre-flight")
+    else:
+        log.info("Verifying HEC targets...")
+        targets = verify_targets(splunk_session, targets)
+        if not targets:
+            raise RuntimeError("All targets failed pre-flight — aborting")
+
+    checkpoint  = load_checkpoint()
+    dedup_store = load_dedup_store()
+    if reset_dedup:
+        if target_filter:
+            # Selective reset: remove only the specified target from sent_to lists
+            log.info("Resetting dedup store for target '%s' (--reset-dedup --target %s)",
+                     target_filter, target_filter)
+            for key, entry in dedup_store.items():
+                sent_to = entry.get("sent_to", [])
+                if target_filter in sent_to:
+                    sent_to.remove(target_filter)
+                    entry["sent_to"] = sent_to
+            save_dedup_store(dedup_store)
+        else:
+            log.info("Resetting dedup store (--reset-dedup)")
+            dedup_store = {}
+            save_dedup_store(dedup_store)
+    else:
+        dedup_store = prune_dedup_store(dedup_store)
+
+    if backfill_date and not reset_dedup:
+        log.warning("--backfill without --reset-dedup: records already in the dedup store "
+                    "(%d entries) will be SKIPPED. If you want to re-send everything, "
+                    "add --reset-dedup. If you're catching up a new target with --target, "
+                    "this is expected.", len(dedup_store))
+
+    try:
+        user_context, personal_info = build_user_context(oura_session)
+    except Exception as e:
+        raise RuntimeError(f"Could not resolve Oura account identity — aborting sync "
+                            f"rather than sending untagged data: {e}") from e
+
+    checkpoint = send_personal_info_snapshot(
+        splunk_session=splunk_session,
+        targets=targets,
+        info=personal_info,
+        user_context=user_context,
+        checkpoint=checkpoint,
+        dry_run=dry_run,
+    )
+    if not dry_run:
+        save_checkpoint(checkpoint)
+
+    configure_hec_log(load_logging_cfg(), targets, dry_run)
+    t0 = time.time()
+    log_info("run started", fetcher_ver=FETCHER_VERSION, run_host=RUN_HOST, targets=len(targets), types=len(data_types),
+             filter=(not no_filter), dry_run=dry_run)
+
+    sent_total = 0
+    skipped_total = 0
+    try:
+        for data_type in data_types:
+            checkpoint, sent, skipped = process_data_type(
+                oura_session=oura_session,
+                splunk_session=splunk_session,
+                targets=targets,
+                data_type=data_type,
+                checkpoint=checkpoint,
+                dedup_store=dedup_store,
+                backfill_date=backfill_date,
+                backfill_end_date=backfill_end_date,
+                dry_run=dry_run,
+                no_filter=no_filter,
+                user_context=user_context,
+            )
+            sent_total += sent
+            skipped_total += skipped
+            if not dry_run:
+                save_checkpoint(checkpoint)
+                save_dedup_store(dedup_store)
+    except Exception as e:
+        log_error("run failed", error=type(e).__name__, detail=str(e),
+                  duration_s=round(time.time() - t0, 1))
+        raise
+
+    log_info("run complete", events=sent_total, skipped=skipped_total, targets=len(targets),
+             duration_s=round(time.time() - t0, 1), dry_run=dry_run)
+    flush_hec_log()
+    return {"sent": sent_total, "skipped": skipped_total, "targets": len(targets)}
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Oura Ring API → Splunk HEC forwarder",
@@ -1388,6 +1519,11 @@ def main():
     parser.add_argument(
         "--backfill", metavar="YYYY-MM-DD",
         help="Ignore checkpoint and pull from this date forward.",
+    )
+    parser.add_argument(
+        "--backfill-end", metavar="YYYY-MM-DD",
+        help="Bound a --backfill to end on this date (inclusive) instead of today. "
+             "Only meaningful with --backfill.",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -1495,114 +1631,23 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     signal.signal(signal.SIGINT, lambda *_: sys.exit(130))
 
-    # -- Load targets ---------------------------------------------------------
-    targets = load_targets(target_filter=args.target)
-    if not targets and not args.dry_run:
-        log.error(
-            "No Splunk targets configured. Either create %s or set "
-            "SPLUNK_HEC_URL + SPLUNK_HEC_TOKEN env vars.", TARGETS_FILE
+    # -- Do the actual work -----------------------------------------------------
+    try:
+        sync(
+            target_filter=args.target,
+            data_types=args.data_types,
+            backfill_date=args.backfill,
+            backfill_end_date=args.backfill_end,
+            dry_run=args.dry_run,
+            no_filter=args.no_filter,
+            reset_dedup=args.reset_dedup,
         )
+    except RuntimeError as e:
+        log.error(str(e))
         sys.exit(1)
-    if not targets and args.dry_run:
-        # Dry-run with no targets — create a placeholder so record formatting works
-        targets = {"dry_run": {
-            "hec_url": "", "hec_token": "",
-            "index": SPLUNK_INDEX, "sourcetype": SPLUNK_SOURCETYPE,
-            "verify_ssl": True,
-        }}
-
-    # -- Build sessions -------------------------------------------------------
-    oura_session   = build_oura_session(client_id, client_secret)
-    splunk_session = requests.Session()
-
-    # -- Pre-flight: verify HEC connectivity and tokens -----------------------
-    if targets.get("dry_run", {}).get("hec_url") == "":
-        log.info("Dry-run with no targets file — skipping HEC pre-flight")
-    else:
-        log.info("Verifying HEC targets...")
-        targets = verify_targets(splunk_session, targets)
-        if not targets:
-            log.error("All targets failed pre-flight — aborting")
-            sys.exit(1)
-
-    checkpoint     = load_checkpoint()
-    dedup_store    = load_dedup_store()
-    if args.reset_dedup:
-        if args.target:
-            # Selective reset: remove only the specified target from sent_to lists
-            log.info("Resetting dedup store for target '%s' (--reset-dedup --target %s)",
-                     args.target, args.target)
-            for key, entry in dedup_store.items():
-                sent_to = entry.get("sent_to", [])
-                if args.target in sent_to:
-                    sent_to.remove(args.target)
-                    entry["sent_to"] = sent_to
-            save_dedup_store(dedup_store)
-        else:
-            log.info("Resetting dedup store (--reset-dedup)")
-            dedup_store = {}
-            save_dedup_store(dedup_store)
-    else:
-        dedup_store = prune_dedup_store(dedup_store)
-
-    if args.backfill and not args.reset_dedup:
-        log.warning("--backfill without --reset-dedup: records already in the dedup store "
-                    "(%d entries) will be SKIPPED. If you want to re-send everything, "
-                    "add --reset-dedup. If you're catching up a new target with --target, "
-                    "this is expected.", len(dedup_store))
-
-    try:
-        user_context, personal_info = build_user_context(oura_session)
-    except Exception as e:
-        log.error("Could not resolve Oura account identity — aborting sync "
-                   "rather than sending untagged data: %s", e)
+    except Exception:
+        # sync() already logged the failure via log_error before re-raising
         sys.exit(1)
-
-    checkpoint = send_personal_info_snapshot(
-        splunk_session=splunk_session,
-        targets=targets,
-        info=personal_info,
-        user_context=user_context,
-        checkpoint=checkpoint,
-        dry_run=args.dry_run,
-    )
-    if not args.dry_run:
-        save_checkpoint(checkpoint)
-
-    configure_hec_log(load_logging_cfg(), targets, args.dry_run)
-    t0 = time.time()
-    log_info("run started", fetcher_ver=FETCHER_VERSION, run_host=RUN_HOST, targets=len(targets), types=len(args.data_types),
-             filter=(not args.no_filter), dry_run=args.dry_run)
-
-    # -- Run per-type pipeline ------------------------------------------------
-    sent_total = 0
-    skipped_total = 0
-    try:
-        for data_type in args.data_types:
-            checkpoint, sent, skipped = process_data_type(
-                oura_session=oura_session,
-                splunk_session=splunk_session,
-                targets=targets,
-                data_type=data_type,
-                checkpoint=checkpoint,
-                dedup_store=dedup_store,
-                backfill_date=args.backfill,
-                dry_run=args.dry_run,
-                no_filter=args.no_filter,
-                user_context=user_context,
-            )
-            sent_total += sent
-            skipped_total += skipped
-            if not args.dry_run:
-                save_checkpoint(checkpoint)
-                save_dedup_store(dedup_store)
-    except Exception as e:
-        log_error("run failed", error=type(e).__name__, detail=str(e),
-                  duration_s=round(time.time() - t0, 1))
-        sys.exit(1)
-
-    log_info("run complete", events=sent_total, skipped=skipped_total, targets=len(targets),
-             duration_s=round(time.time() - t0, 1), dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
