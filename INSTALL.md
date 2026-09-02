@@ -118,6 +118,7 @@ Device name is auto-derived after first ingest (Oura `ring_config` supplies mode
 ```bash
 python3 oura_to_hec_with_phi.py --dry-run          # print payloads, send nothing
 python3 oura_to_hec_with_phi.py --backfill 2024-01-01
+python3 oura_to_hec_with_phi.py --backfill 2024-01-01 --backfill-end 2024-03-31   # bounded range
 python3 oura_to_hec_with_phi.py                     # incremental (checkpoint - overlap .. now)
 python3 oura_to_hec_with_phi.py --status            # per-target coverage
 ```
@@ -146,3 +147,5 @@ Then open the wearables dashboards (Today / Sleep / Heart / Activity / Wellness 
 - **Nothing in Splunk** → check `oura_targets.json` hec_url/token/index; `--dry-run` to inspect payloads.
 - **Re-send a date** → `--reset-dedup` (all) or `--reset-dedup --target NAME` (one), then `--backfill`.
 - **Missing history** → Oura retains limited history for some types; backfill only recovers what the API still serves.
+- **Splitting a large backfill** → add `--backfill-end YYYY-MM-DD` to bound a run to a specific range instead
+  of always running through today, so a big historical pull can be done in several smaller chunks.
