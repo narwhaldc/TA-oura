@@ -1,7 +1,7 @@
 # TA-oura → Splunk — Installation Guide
 
 Setup for the Oura data pipeline into the Wearables platform.
-**App version:** TA-oura `0.2.13` · **Ingest:** `tools/oura_to_hec_with_phi.py` (Oura v2 API → HEC, OAuth2 pull)
+**App version:** TA-oura `0.2.14` · **Ingest:** `tools/oura_to_hec_with_phi.py` (Oura v2 API → HEC, OAuth2 pull)
 
 The Oura fetcher moved here from the legacy `oura-health-splunk` repo (2026-07) so each vendor's
 normalization + ingest live together. It's **repo-only tooling — never shipped in the `.spl`**
@@ -28,8 +28,8 @@ Oura Ring → Oura Cloud API (v2)
 - **`wearables` app** installed (data model + KV registries), and **TA-oura** installed.
 - A Splunk **HEC token** with access to `index=wearables`.
 - Python 3.9+ on the ingest host.
-- An **Oura developer app** (OAuth2 client id/secret from developer.ouraring.com) — or a legacy
-  Personal Access Token as fallback.
+- An **Oura developer app** you register yourself (OAuth2 client id/secret) — step 3a below.
+  (Oura has deprecated Personal Access Tokens; do not rely on that route.)
 
 ## 1. Install the Splunk apps
 Install + restart Splunk: **`TA-oura`** (this add-on) and **`wearables`** (model + dashboards).
@@ -44,14 +44,39 @@ python3 -m pip install requests
 ```
 (Or copy it from a checkout / `wget` the same URL.)
 
-## 3. Oura OAuth2 authorization (one-time)
+## 3. Oura OAuth2 setup (one-time)
+
+### 3a. Register an Oura developer application
+1. Sign in at **https://developer.ouraring.com** with your Oura account, open **Applications**,
+   and choose **Create New**.
+2. Fill in the form: application name, description, contact email, and the Privacy Policy,
+   Terms of Service and Website URLs (Oura asks for all three; use pages you control).
+3. **Redirect URI — enter exactly `http://localhost:8182/callback`.** The fetcher hard-codes this
+   address and Oura requires the registered URI to match it character for character. A different
+   value (or a missing one) makes the authorize step fail.
+4. **Scopes — tick all eleven:** Email, Personal, Daily, Heartrate, Tag, Workout, Session, SpO2,
+   Ring Configuration, Stress, Heart Health. Stress and Heart Health are the newer ones; without
+   them those endpoints answer 401 (re-run `--auth` after adding a scope).
+5. Save, then open the application and copy its **Client Id** and **Client Secret**.
+   (**Reset Secret** invalidates the old secret but leaves already-issued access tokens working.)
+6. **User limit:** a new application supports **10 users**. For more, use **Request more users**
+   on the application page; Oura requires at least one active user (i.e. finish 3b first).
+
+### 3b. Authorize the app against your Oura account
 ```bash
-export OURA_CLIENT_ID='...'        # from developer.ouraring.com
-export OURA_CLIENT_SECRET='...'
+export OURA_CLIENT_ID="..."        # Client Id from step 3a
+export OURA_CLIENT_SECRET="..."    # Client Secret from step 3a
 python3 oura_to_hec_with_phi.py --auth     # opens a browser; approve
 ```
 Tokens persist to `oura_tokens.json` (`OURA_TOKEN_FILE`) and auto-refresh thereafter.
-(Fallback: set `OURA_PAT` to a Personal Access Token instead of OAuth2.)
+
+> **Headless ingest host?** `--auth` opens a browser and listens on `localhost:8182` **on the
+> machine you run it on**, so it fails on a host with no browser. Run `--auth` on a machine that
+> has one (your laptop), then copy `oura_tokens.json` to the ingest host's fetcher directory.
+> **Oura refresh tokens are single-use** — each refresh invalidates the previous one — so after
+> copying, only the ingest host may run the fetcher. If the laptop refreshes the same token
+> first, the ingest host's copy stops working and you re-run `--auth`.
+
 > Keep client secret / tokens in env or the token file — **never commit them** (gitignored).
 
 ## 4. HEC targets (`oura_targets.json`)
@@ -143,7 +168,9 @@ Then open the wearables dashboards (Today / Sleep / Heart / Activity / Wellness 
 (`--help`, `--show-filters`).
 
 ## Troubleshooting
-- **Auth errors** → re-run `--auth`; confirm `OURA_CLIENT_ID/SECRET` (or `OURA_PAT`).
+- **Auth errors** → re-run `--auth`; confirm `OURA_CLIENT_ID/SECRET`. If the consent page
+  rejects the request, check the application's redirect URI is exactly
+  `http://localhost:8182/callback` and that all eleven scopes are ticked (step 3a).
 - **Nothing in Splunk** → check `oura_targets.json` hec_url/token/index; `--dry-run` to inspect payloads.
 - **Re-send a date** → `--reset-dedup` (all) or `--reset-dedup --target NAME` (one), then `--backfill`.
 - **Missing history** → Oura retains limited history for some types; backfill only recovers what the API still serves.
