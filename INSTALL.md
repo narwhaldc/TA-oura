@@ -1,7 +1,7 @@
 # TA-oura → Splunk — Installation Guide
 
 Setup for the Oura data pipeline into the Wearables platform.
-**App version:** TA-oura `0.2.14` · **Ingest:** `tools/oura_to_hec_with_phi.py` (Oura v2 API → HEC, OAuth2 pull)
+**App version:** TA-oura `0.2.15` · **Ingest:** `tools/oura_to_hec_with_phi.py` (Oura v2 API → HEC, OAuth2 pull)
 
 The Oura fetcher moved here from the legacy `oura-health-splunk` repo (2026-07) so each vendor's
 normalization + ingest live together. It's **repo-only tooling — never shipped in the `.spl`**
@@ -83,6 +83,11 @@ Tokens persist to `oura_tokens.json` (`OURA_TOKEN_FILE`) and auto-refresh therea
 Copy the template and fill in your HEC details:
 ```bash
 cp tools/oura_targets.example.json tools/oura_targets.json
+```
+**Lock the secret files down** — they hold tokens/credentials, and the fetcher runs as you, so owner-only is all it needs:
+```bash
+chmod 600 tools/oura_targets.json
+chmod 600 tools/.env   # only if you keep the client id/secret in a .env
 ```
 Multi-target fan-out; same format as `garmin_targets.json`:
 ```json
